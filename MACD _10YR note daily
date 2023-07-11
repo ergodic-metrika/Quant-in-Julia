@@ -1,0 +1,171 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Mon May  8 11:23:04 2023
+
+@author: sigma
+"""
+
+using Pkg
+Pkg.add(["CSV", "DataFrames", "Statistics", "Plots", "Dates", "Printf"])
+using CSV
+using DataFrames
+using Statistics
+using Plots
+using Dates
+using Printf
+
+file_path = "D:/Python for Quant Model/US10Y_daily.csv"
+
+
+data = CSV.read(file_path, DataFrame)
+close_prices = data.Close
+
+dates = data.Date
+plot(dates, close_prices, xlabel="Date", ylabel="Close Price", title="US10Y Daily Close Prices")
+plot!(xrotation=90)
+
+using Pkg
+Pkg.add("MarketTechnicals")
+using MarketTechnicals
+
+function ema(prices, n)
+    k = 2 / (n + 1)
+    ema_values = similar(prices)
+    ema_values[1] = prices[1]
+    for i in 2:length(prices)
+        ema_values[i] = prices[i] * k + ema_values[i - 1] * (1 - k)
+    end
+    return ema_values
+end
+
+function macd(prices, short_period = 10, long_period = 20, signal_period = 9)
+    short_ema = ema(prices, short_period)
+    long_ema = ema(prices, long_period)
+    macd_values = short_ema - long_ema
+    signal_line = ema(macd_values, signal_period)
+    return macd_values, signal_line
+end
+
+macd_values, signal_line = macd(close_prices)
+
+signals = []
+for i in 1:length(macd_values)
+    if macd_values[i] > signal_line[i]
+        push!(signals, "Buy")
+    elseif macd_values[i] < signal_line[i]
+        push!(signals, "Sell")
+    else
+        push!(signals, "Hold")
+    end
+end
+
+result = hcat(data, macd_values, signal_line, signals, makeunique=true)
+ncols = ncol(result)
+
+corrected_result = DataFrame(
+    Date = result.Date,
+    Close = result.Close,
+    MACD = result[!, ncols-2],
+    Signal = result[!, ncols-1],
+    Signal_Type = result[!, ncols]
+)
+
+
+# Create separate DataFrames for Buy and Sell signals
+buy_signals = filter(row -> row.Signal_Type == "Buy", corrected_result)
+sell_signals = filter(row -> row.Signal_Type == "Sell", corrected_result)
+
+# Plot Close Price
+price_plot = plot(corrected_result.Date, corrected_result.Close, label="Close Price", ylabel="Price", color=:blue)
+plot!(xrotation=90)
+# Plot Buy Signals
+scatter!(price_plot, buy_signals.Date, buy_signals.Close, markersize=4, label="Buy Signal", color=:green, marker=:circle)
+
+# Plot Sell Signals
+scatter!(price_plot, sell_signals.Date, sell_signals.Close, markersize=4, label="Sell Signal", color=:red, marker=:circle)
+
+xlabel!("Date")
+title!("US10Y Daily Close Prices with MACD Trading Signals")
+
+display(price_plot)
+
+# Calculate daily returns
+daily_returns = [0.0; diff(corrected_result.Close) ./ corrected_result.Close[1:end-1]]
+
+# Calculate daily PnL
+daily_pnl = daily_returns .* map(x -> x == "Buy" ? 1 : x == "Sell" ? -1 : 0, corrected_result.Signal_Type)
+
+# Calculate cumulative PnL
+cumulative_pnl = cumprod(1 .+ daily_pnl) .* 100
+
+# Add daily PnL and cumulative PnL to the DataFrame
+corrected_result[!, "Daily_PnL"] = daily_pnl
+corrected_result[!, "Cumulative_PnL"] = cumulative_pnl
+
+
+# Create a subplot for daily PnL
+daily_pnl_plot = plot(corrected_result.Date, corrected_result.Daily_PnL, label="Daily PnL", ylabel="Daily PnL", color=:blue)
+xlabel!("Date")
+plot!(xrotation=90)
+title!("Daily PnL")
+
+# Create a subplot for cumulative PnL
+cumulative_pnl_plot = plot(corrected_result.Date, corrected_result.Cumulative_PnL, label="Cumulative PnL", ylabel="Cumulative PnL", color=:green)
+xlabel!("Date")
+plot!(xrotation=90)
+title!("Cumulative PnL (Base at 100)")
+
+# Combine subplots and display
+combined_plot = plot(daily_pnl_plot, cumulative_pnl_plot, layout=(2, 1), size=(800, 600))
+display(combined_plot)
+
+
+#Performance
+#Return
+cumulative_pnl_first=cumulative_pnl[1]
+cumulative_pnl_last=cumulative_pnl[end]
+pnl_index_return=(cumulative_pnl_last-cumulative_pnl_first)/cumulative_pnl_first
+
+# Set the risk-free rate
+risk_free_rate = 0.03
+
+# Calculate daily excess returns
+excess_returns = pnl_index_return- risk_free_rate
+
+# Calculate the standard deviation of daily PnL
+std_daily_pnl = std(corrected_result.Daily_PnL)*sqrt(250)
+
+# Calculate the annualized Sharpe Ratio
+annualized_sharpe_ratio =excess_returns /std_daily_pnl
+
+
+###########################Kelly Criterion#####################
+#Add KC from here
+function kelly_criterion(win_probability, win_loss_ratio)
+    optimal_fraction = win_probability - ((1 - win_probability) / win_loss_ratio)
+    return optimal_fraction
+end
+
+total_trades = length(corrected_result.Signal_Type)
+wins = sum(corrected_result.Signal_Type .== "Buy") + sum(corrected_result.Signal_Type .== "Sell")
+win_probability = wins / total_trades
+
+winning_trades_pnl = filter(row -> row.Signal_Type in ["Buy", "Sell"], corrected_result).Daily_PnL
+win_loss_ratio = mean(winning_trades_pnl) / -mean(filter(x -> x < 0, winning_trades_pnl))
+
+optimal_fraction = kelly_criterion(win_probability, win_loss_ratio)
+kelly_daily_pnl = daily_returns .* map(x -> x == "Buy" ? optimal_fraction : x == "Sell" ? -optimal_fraction : 0, corrected_result.Signal_Type)
+
+kelly_cumulative_pnl = cumprod(1 .+ kelly_daily_pnl) .* 100
+corrected_result[!, "Kelly_Daily_PnL"] = kelly_daily_pnl
+
+kelly_pnl_index_return = (kelly_cumulative_pnl[end] - kelly_cumulative_pnl[1]) / kelly_cumulative_pnl[1]
+kelly_excess_returns = kelly_pnl_index_return - risk_free_rate
+kelly_std_daily_pnl = std(corrected_result.Kelly_Daily_PnL) * sqrt(250)
+kelly_annualized_sharpe_ratio = kelly_excess_returns / kelly_std_daily_pnl
+
+corrected_result[!, "Kelly_Cumulative_PnL"] = kelly_cumulative_pnl
+
+
+
+#Prompt: optimize kelly criterion, short_period, long_period, and singal_period that maximize cumulative pnl
